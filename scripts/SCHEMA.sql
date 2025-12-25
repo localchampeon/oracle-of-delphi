@@ -12,5 +12,5 @@ CREATE TABLE transactions(
 	CustomerID VARCHAR(50),
 	Country VARCHAR(50),
 	SalesChannel VARCHAR(50),
-	UNIQUE (InvoiceNo, StockCode, CustomerID)
+	UNIQUE (InvoiceNo, Description)
 );
