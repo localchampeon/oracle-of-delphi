@@ -1,16 +1,16 @@
 USE OracleOfDelphi
 
 CREATE TABLE transactions(
-	TransactionID INT IDENTITY(1,1) PRIMARY KEY,
-	InvoiceNo VARCHAR(50),
-	StockCode VARCHAR(50),
-	Description VARCHAR(300),
-	InvoiceDate DATETIME,
-	Quantity INT,
-	UnitPrice INT,
-	Revenue INT,
-	CustomerID VARCHAR(50),
-	Country VARCHAR(50),
-	SalesChannel VARCHAR(50),
-	UNIQUE (InvoiceNo, Description)
+	transactionid INT IDENTITY(1,1) PRIMARY KEY,
+	invoiceno VARCHAR(50),
+	stockcode VARCHAR(50),
+	description VARCHAR(300),
+	invoicedate DATETIME,
+	quantity INT,
+	unitprice INT,
+	revenue INT,
+	customerid VARCHAR(50),
+	country VARCHAR(50),
+	saleschannel VARCHAR(50),
+	UNIQUE (invoiceno, description)
 );
