@@ -1,107 +1,110 @@
-#TYPE A
+#deep seek
 import pandas as pd
 import numpy as np
-import pyodbc
 
-def to_python_scalar(x):
-    """Converts numpy/pandas types to native Python types for pyodbc."""
-    if pd.isna(x):
-        return None
-    if isinstance(x, (np.integer,)):
-        return int(x)
-    if isinstance(x, (np.floating,)):
-        return float(x)
-    return x
-
-def load_to_sql(df, server, driver, database, table_name='sales_hybrid'):
-    df_clean = df.copy()
-
-    # 1. Column Rename
-    if 'sales_channel' in df_clean.columns:
-        df_clean = df_clean.rename(columns={'sales_channel': 'saleschannel'})
-
-    # 2. Numeric Cleaning (NO FILLNA - keeping np.nan)
-    # UnitPrice and Revenue as float64 with 2 decimal rounding
-    df_clean['unitprice'] = pd.to_numeric(df_clean['unitprice'], errors='coerce').round(2)
-    df_clean['revenue'] = pd.to_numeric(df_clean['revenue'], errors='coerce').round(2)
+def hybridize(data, seed=42):
+    """
+    Create hybrid 2011 (real) + 2012 (synthetic) sales data
+    from UCI Online Retail dataset.
+    """
+    # Set seed for reproducibility
+    np.random.seed(seed)
     
-    # Quantity as float64 first (because int64 cannot hold np.nan)
-    df_clean['quantity'] = pd.to_numeric(df_clean['quantity'], errors='coerce')
-
-    # 3. Date Cleaning
-    # Invalid dates become NaT, which to_python_scalar turns into None
-    df_clean['invoicedate'] = pd.to_datetime(df_clean['invoicedate'], errors='coerce')
-
-    # 4. String Cleaning
-    string_cols = ['invoiceno', 'stockcode', 'description', 'customerid', 'country', 'saleschannel']
-    for col in string_cols:
-        if col in df_clean.columns:
-            # strip() and handle 'nan' strings
-            df_clean[col] = df_clean[col].astype(str).str.strip()
-            df_clean[col] = df_clean[col].replace(['nan', 'None', ''], None)
-
-    # 5. Deduplication
-    df_clean = df_clean.drop_duplicates(subset=['invoiceno', 'description'], keep='first')
-
-    # 6. SQL Connection
-    '''conn_str = (
-        "DRIVER={ODBC Driver 17 for SQL Server};"
-        f"SERVER={server};"
-        f"DATABASE={database};"
-        "Trusted_Connection=yes;"
-    )'''
-    conn_str =  f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};Trusted_Connection=yes;"        
+    # Standardize columns
+    data.columns = data.columns.str.lower()
     
-    try:
-        conn = pyodbc.connect(conn_str)
-        cursor = conn.cursor()
-        print(f"Connected to {server}.{database}")
-    except Exception as e:
-        print(f"Connection failed: {e}")
-        return
-
-    # 7. Data Preparation
-    # Exclude invoiceid (Identity column)
-    available_cols = [col for col in df_clean.columns]
-    data_to_insert = df_clean[available_cols]
-
-    # Convert to list of tuples using your working scalar converter
-    records = [
-        tuple(to_python_scalar(v) for v in row)
-        for row in data_to_insert.itertuples(index=False, name=None)
-    ]
-
-    # 8. Batch Insert
-    placeholders = ', '.join(['?'] * len(available_cols))
-    col_names = ', '.join(available_cols)
-    insert_sql = f"INSERT INTO {table_name} ({col_names}) VALUES ({placeholders})"
-
-    batch_size = 100000
-    for i in range(0, len(records), batch_size):
-        batch = records[i:i + batch_size]
-        try:
-            cursor.fast_executemany = True
-            cursor.executemany(insert_sql, batch)
-            conn.commit()
-            print(f"✓ Batch {i//batch_size + 1} inserted.")
-        except Exception as e:
-            conn.rollback()
-            print(f"✗ Batch failed: {e}")
-            raise 
-
-def main():
-    path = "C:/Users/Lenovo/hybrid_sales_data_deepseek.csv"
-    df = pd.read_csv(path)
+    # Convert date
+    data['invoicedate'] = pd.to_datetime(data['invoicedate'])
     
-    # Define required columns for your validation
-    required_cols = {'invoiceno', 'invoicedate', 'unitprice', 'quantity'} 
+    # Get 2011 data only
+    data_2011 = data[data['invoicedate'].dt.year == 2011].copy()
     
-    load_to_sql(
-        df=df,
-        driver = 'ODBC Driver 17 for SQL Server',
-        server='DESKTOP-ELTS2E5\\SQLEXPRESS',
-        database='OracleOfDelphi'
+    # Create 2012 synthetic data
+    data_2012 = data_2011.copy()
+    
+    # Shift dates by 1 year + random variation (±2 days)
+    date_variation = pd.to_timedelta(np.random.randint(-2, 3, len(data_2012)), unit='D')
+    data_2012['invoicedate'] = data_2012['invoicedate'] + pd.DateOffset(years=1) + date_variation
+    
+    # Make invoice numbers unique
+    data_2012['invoiceno'] = data_2012['invoiceno'].astype(str) + 'S'
+    
+    # Scale quantities (product-specific patterns)
+    if 'stockcode' in data_2012.columns:
+        product_groups = data_2012['stockcode'].astype('category').cat.codes % 3
+    else:
+        product_groups = np.random.randint(0, 3, len(data_2012))
+    
+    scale_factors = np.where(
+        product_groups == 0, np.random.uniform(0.9, 1.1, len(data_2012)),
+        np.where(
+            product_groups == 1, np.random.uniform(1.1, 1.3, len(data_2012)),
+            np.random.uniform(0.7, 0.9, len(data_2012))
+        )
     )
+    
+    data_2012['quantity'] = (data_2012['quantity'] * scale_factors).round().astype(int)
+    data_2012['quantity'] = data_2012['quantity'].clip(lower=1)
+    
+    # Adjust prices for 2012
+    price_adjust = np.where(
+        product_groups == 1, np.random.uniform(1.05, 1.15, len(data_2012)),
+        np.random.uniform(1.02, 1.04, len(data_2012))
+    )
+    data_2012['unitprice'] = (data_2012['unitprice'] * price_adjust).round(2)
+    
+    # FIXED: Nullify 2% of customer IDs - use simple random method
+    if 'customerid' in data_2012.columns:
+        mask = np.random.rand(len(data_2012)) < 0.02
+        data_2012.loc[mask, 'customerid'] = np.nan
+    
+    # Sales channels
+    data_2011['sales_channel'] = 'online'
+    data_2012['sales_channel'] = np.random.choice(
+        ['online', 'offline'], 
+        size=len(data_2012), 
+        p=[0.8, 0.2]
+    )
+    
+    # Combine datasets
+    hybrid_data = pd.concat([data_2011, data_2012], ignore_index=True)
+    
+    # Calculate revenue
+    hybrid_data['revenue'] = (hybrid_data['quantity'] * hybrid_data['unitprice']).round(2)
+    
+    # Handle negative quantities
+    if (hybrid_data['quantity'] < 0).any():
+        neg_count = (hybrid_data['quantity'] < 0).sum()
+        print(f"Note: Found {neg_count} negative quantities - converting to positive")
+        hybrid_data.loc[hybrid_data['quantity'] < 0, 'quantity'] = hybrid_data.loc[hybrid_data['quantity'] < 0, 'quantity'].abs()
+        hybrid_data.loc[hybrid_data['quantity'] < 0, 'revenue'] = hybrid_data.loc[hybrid_data['quantity'] < 0, 'revenue'] * -1
+    
+    # Save
+    hybrid_data.to_csv('hybrid_sales_data_deepseek.csv', index=False)
+    
+    # Summary
+    print("=" * 50)
+    print("HYBRID DATA CREATED SUCCESSFULLY")
+    print("=" * 50)
+    print(f"Total records: {len(hybrid_data):,}")
+    print(f"  2011 (real): {len(data_2011):,}")
+    print(f"  2012 (synth): {len(data_2012):,}")
+    print(f"Date range: {hybrid_data['invoicedate'].min().date()} to {hybrid_data['invoicedate'].max().date()}")
+    print(f"Total revenue: ${hybrid_data['revenue'].sum():,.2f}")
+    print(f"File saved: hybrid_sales_data.csv")
+    print("=" * 50)
+    
+    return hybrid_data
 
+
+# Usage
 if __name__ == "__main__":
-    main()
+    # Load your data
+    data = pd.read_excel("C:/Users/Lenovo/Documents/MerchantOfVenice/ucl_data.xlsx")
+    
+    # Create hybrid dataset
+    df = hybridize(data, seed=42)
+    
+    # Show first few rows
+    print("\nFirst 5 rows:")
+    print(df.head())
