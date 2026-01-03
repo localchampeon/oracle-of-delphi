@@ -1,44 +1,107 @@
-def hybridize(data):
-    """
-    this function takes a csv file - ucl data- for one year(2011) and create a whole
-    new set of synthetic data for 2012. it then merges them and returns a full hybrid
-    data set for 2 years.
-    args:
-    data = a csv file for UCL containing some part of 2010 and full 2011 trasctional data
-    """
-    import pandas as pd
-    from datetime import datetime as dt
-    import numpy as np
+#TYPE A
+import pandas as pd
+import numpy as np
+import pyodbc
 
-    #copy data and drop 2010 rows
-    data.columns = data.columns.str.lower()
-    data_synth = data.copy()
-    data_synth['year'] = data_synth['invoicedate'].dt.year
-    data_synth = data_synth[data_synth['year'] == 2011]
-    data_synth.drop('year',axis=1, inplace = True)
-    data_synth.head()
+def to_python_scalar(x):
+    """Converts numpy/pandas types to native Python types for pyodbc."""
+    if pd.isna(x):
+        return None
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating,)):
+        return float(x)
+    return x
+
+def load_to_sql(df, server, driver, database, table_name='sales_hybrid'):
+    df_clean = df.copy()
+
+    # 1. Column Rename
+    if 'sales_channel' in df_clean.columns:
+        df_clean = df_clean.rename(columns={'sales_channel': 'saleschannel'})
+
+    # 2. Numeric Cleaning (NO FILLNA - keeping np.nan)
+    # UnitPrice and Revenue as float64 with 2 decimal rounding
+    df_clean['unitprice'] = pd.to_numeric(df_clean['unitprice'], errors='coerce').round(2)
+    df_clean['revenue'] = pd.to_numeric(df_clean['revenue'], errors='coerce').round(2)
     
-    #create synthetic data for invoice date: one year
-    data_synth['invoicedate'] = pd.to_datetime(data_synth['invoicedate'] + pd.DateOffset(years =1))
+    # Quantity as float64 first (because int64 cannot hold np.nan)
+    df_clean['quantity'] = pd.to_numeric(df_clean['quantity'], errors='coerce')
 
-    #Introduce realistic volume variation 15+ to -15 variations introduced
-    scale_factor = np.random.uniform(0.85, 1.15, len(data_synth))
-    data_synth['quantity'] = (data_synth['quantity'] * scale_factor).round().astype(int)
+    # 3. Date Cleaning
+    # Invalid dates become NaT, which to_python_scalar turns into None
+    df_clean['invoicedate'] = pd.to_datetime(df_clean['invoicedate'], errors='coerce')
 
-    #introduce synthetic missingness by adding 2% missing values to the data
-    mask = np.random.rand(len(data_synth)) < 0.02 # rand generates values btw 0 and 1. 0.02 is 2% equiv
-    data_synth['customerid'] = data_synth.loc[mask, 'customerid'] = None #"Keep only the rows where the mask is True."
+    # 4. String Cleaning
+    string_cols = ['invoiceno', 'stockcode', 'description', 'customerid', 'country', 'saleschannel']
+    for col in string_cols:
+        if col in df_clean.columns:
+            # strip() and handle 'nan' strings
+            df_clean[col] = df_clean[col].astype(str).str.strip()
+            df_clean[col] = df_clean[col].replace(['nan', 'None', ''], None)
 
-    data_synth['sales_channel'] = np.random.choice(
-    ['online','offline'], size = len(data_synth), p = [0.7,0.3]
+    # 5. Deduplication
+    df_clean = df_clean.drop_duplicates(subset=['invoiceno', 'description'], keep='first')
+
+    # 6. SQL Connection
+    '''conn_str = (
+        "DRIVER={ODBC Driver 17 for SQL Server};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        "Trusted_Connection=yes;"
+    )'''
+    conn_str =  f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};Trusted_Connection=yes;"        
+    
+    try:
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+        print(f"Connected to {server}.{database}")
+    except Exception as e:
+        print(f"Connection failed: {e}")
+        return
+
+    # 7. Data Preparation
+    # Exclude invoiceid (Identity column)
+    available_cols = [col for col in df_clean.columns]
+    data_to_insert = df_clean[available_cols]
+
+    # Convert to list of tuples using your working scalar converter
+    records = [
+        tuple(to_python_scalar(v) for v in row)
+        for row in data_to_insert.itertuples(index=False, name=None)
+    ]
+
+    # 8. Batch Insert
+    placeholders = ', '.join(['?'] * len(available_cols))
+    col_names = ', '.join(available_cols)
+    insert_sql = f"INSERT INTO {table_name} ({col_names}) VALUES ({placeholders})"
+
+    batch_size = 100000
+    for i in range(0, len(records), batch_size):
+        batch = records[i:i + batch_size]
+        try:
+            cursor.fast_executemany = True
+            cursor.executemany(insert_sql, batch)
+            conn.commit()
+            print(f"✓ Batch {i//batch_size + 1} inserted.")
+        except Exception as e:
+            conn.rollback()
+            print(f"✗ Batch failed: {e}")
+            raise 
+
+def main():
+    path = "C:/Users/Lenovo/hybrid_sales_data_deepseek.csv"
+    df = pd.read_csv(path)
+    
+    # Define required columns for your validation
+    required_cols = {'invoiceno', 'invoicedate', 'unitprice', 'quantity'} 
+    
+    load_to_sql(
+        df=df,
+        driver = 'ODBC Driver 17 for SQL Server',
+        server='DESKTOP-ELTS2E5\\SQLEXPRESS',
+        database='OracleOfDelphi'
     )
 
-    #merge the 2 cells
-    data_hybrid = pd.concat([data,data_synth], ignore_index=True)
-
-    #calculate revenue
-    data_hybrid['revenue'] = data_hybrid['quantity'] * data_hybrid['unitprice']
-
-    data_hybrid.to_csv('sales_hybrid_data.csv',index = False)
-
-    return
+if __name__ == "__main__":
+    main()
